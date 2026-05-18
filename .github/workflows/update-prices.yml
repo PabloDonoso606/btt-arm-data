@@ -1,0 +1,30 @@
+name: Update CS2 Prices
+
+on:
+  schedule:
+    - cron: "0 0 * * *"  # Cada día a medianoche UTC
+  workflow_dispatch:       # Permite ejecutarlo manualmente también
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: latest
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Run price updater
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: node index.js

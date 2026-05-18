@@ -1,35 +1,29 @@
-// src/index.js
 import { supabase } from "./lib/supabase.js";
 
-// Delay aleatorio entre min y max ms
-const randomDelay = (min, max) =>
-  new Promise((resolve) =>
-    setTimeout(resolve, Math.floor(Math.random() * (max - min + 1)) + min),
-  );
-
-// Headers que simulan un navegador real
-const getBrowserHeaders = () => ({
-  "User-Agent":
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-  Accept: "application/json, text/javascript, */*; q=0.01",
-  "Accept-Language": "en-US,en;q=0.9",
-  "Accept-Encoding": "gzip, deflate, br",
-  Referer: "https://steamcommunity.com/market/",
-  "X-Requested-With": "XMLHttpRequest",
-  Connection: "keep-alive",
-  "Sec-Fetch-Dest": "empty",
-  "Sec-Fetch-Mode": "cors",
-  "Sec-Fetch-Site": "same-origin",
-});
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const randomDelay = () => delay(Math.floor(Math.random() * 5000) + 5000);
 
 async function getSteamApiUrls() {
-  const { data, error } = await supabase
-    .from("steam")
-    .select("id, api_url")
-    .order("price_updated_at", { ascending: true })
-    .limit(10000);
-  if (error) throw new Error(error.message);
-  return data;
+  const PAGE_SIZE = 1000;
+  let allData = [];
+  let from = 0;
+
+  while (true) {
+    const { data, error } = await supabase
+      .from("steam")
+      .select("id, api_url")
+      .order("price_updated_at", { ascending: true })
+      .range(from, from + PAGE_SIZE - 1);
+
+    if (error) throw new Error(error.message);
+
+    allData.push(...data);
+
+    if (data.length < PAGE_SIZE) break;
+    from += PAGE_SIZE;
+  }
+
+  return allData;
 }
 
 async function savePrice(id, price) {
@@ -40,86 +34,48 @@ async function savePrice(id, price) {
   if (error) throw new Error(error.message);
 }
 
-async function fetchWithRetry(id, api_url, retries = 3) {
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    try {
-      const response = await fetch(api_url, { headers: getBrowserHeaders() });
+async function fetchPrice(id, api_url) {
+  const response = await fetch(api_url);
+  if (!response.ok) throw new Error(`HTTP ${response.status} — ${api_url}`);
 
-      // Rate limit → espera larga y reintenta
-      if (response.status === 429) {
-        const waitMs = 60000 * attempt; // 60s, 120s, 180s según intento
-        console.warn(
-          `[${id}] 429 Too Many Requests. Intento ${attempt}/${retries}. Esperando ${waitMs / 1000}s...`,
-        );
-        await randomDelay(waitMs, waitMs + 10000);
-        continue;
-      }
+  const json = await response.json();
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
+  if (!json.success) return null;
 
-      const data = await response.json();
+  const raw = json.lowest_price ?? json.median_price ?? null;
+  if (!raw) return null;
 
-      // Steam a veces responde { success: false } sin lanzar error HTTP
-      if (!data.success) {
-        console.warn(`[${id}] Steam respondió success:false`);
-        return null;
-      }
-
-      return data;
-    } catch (err) {
-      if (attempt === retries) throw err;
-      console.warn(
-        `[${id}] Error intento ${attempt}/${retries}: ${err.message}`,
-      );
-      await randomDelay(10000, 20000);
-    }
-  }
-  return null;
+  // Limpia símbolo de moneda y convierte a número
+  const price = parseFloat(raw.replace(/[^0-9.]/g, ""));
+  return isNaN(price) ? null : price;
 }
 
-async function fetchAllSteamApis() {
+async function run() {
   const urls = await getSteamApiUrls();
-  const total = urls.length;
+  console.log(`Procesando ${urls.length} URLs...`);
 
-  for (let i = 0; i < total; i++) {
-    const { id, api_url } = urls[i];
-    console.log(`[${i + 1}/${total}] [${id}] Fetching: ${api_url}`);
-
+  for (const [i, { id, api_url }] of urls.entries()) {
     try {
-      const data = await fetchWithRetry(id, api_url);
+      const price = await fetchPrice(id, api_url);
 
-      if (!data) {
-        console.log(`[${id}] Sin datos, se omite.`);
+      if (price !== null) {
+        await savePrice(id, price);
+        console.log(`[${i + 1}/${urls.length}] ✓ id=${id} price=${price}`);
       } else {
-        const rawPrice = data.lowest_price ?? data.median_price;
-        if (!rawPrice) {
-          console.warn(`[${id}] Sin precio en respuesta.`);
-        } else {
-          const price = Number(rawPrice.replace("$", "").replace(",", ""));
-          await savePrice(id, price);
-          console.log(`[${id}] ✓ Precio actualizado: $${price}`);
-        }
+        console.warn(`[${i + 1}/${urls.length}] ⚠ Sin precio — id=${id}`);
       }
-    } catch (error) {
-      console.error(`[${id}] ✗ Error fatal en ${api_url}:`, error.message);
+    } catch (err) {
+      console.error(`[${i + 1}/${urls.length}] ✗ id=${id}: ${err.message}`);
     }
 
-    // Delay entre requests: aleatorio 8s–20s para parecer humano
-    // Cada 10 items, pausa larga (simula que el usuario navega)
-    if (i < total - 1) {
-      if ((i + 1) % 10 === 0) {
-        const pause = 10000; // 1 min cada 10 items
-        console.log(`\n[Pausa larga: ${pause / 1000}s tras ${i + 1} items]\n`);
-        await randomDelay(pause, pause + 15000);
-      } else {
-        await randomDelay(5000, 8000); // 8–20s entre requests normales
-      }
+    if (i < urls.length - 1) {
+      const ms = Math.floor(Math.random() * 5000) + 5000;
+      console.log(`  ↳ Esperando ${(ms / 1000).toFixed(1)}s...`);
+      await delay(ms);
     }
   }
 
-  console.log("\n✅ Proceso completado.");
+  console.log("Proceso completado.");
 }
 
-await fetchAllSteamApis();
+await run();
