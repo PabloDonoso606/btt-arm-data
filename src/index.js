@@ -1,7 +1,16 @@
 import { supabase } from "./lib/supabase.js";
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const randomDelay = () => delay(Math.floor(Math.random() * 5000) + 5000);
+
+const HEADERS = {
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+  Accept: "application/json, text/plain, */*",
+  "Accept-Language": "en-US,en;q=0.9",
+  "Accept-Encoding": "gzip, deflate, br",
+  Connection: "keep-alive",
+  Referer: "https://steamcommunity.com/market/",
+};
 
 async function getSteamApiUrls() {
   const PAGE_SIZE = 1000;
@@ -34,18 +43,42 @@ async function savePrice(id, price) {
   if (error) throw new Error(error.message);
 }
 
-async function fetchPrice(id, api_url) {
-  const response = await fetch(api_url);
-  if (!response.ok) throw new Error(`HTTP ${response.status} — ${api_url}`);
+async function fetchWithRetry(api_url, maxRetries = 5) {
+  let attempt = 0;
 
-  const json = await response.json();
+  while (attempt < maxRetries) {
+    const response = await fetch(api_url, { headers: HEADERS });
+
+    if (response.ok) return response.json();
+
+    if (response.status === 429) {
+      attempt++;
+      if (attempt >= maxRetries)
+        throw new Error(`429 tras ${maxRetries} intentos — ${api_url}`);
+
+      const backoff = Math.pow(2, attempt) * 10_000;
+      const jitter = Math.random() * 5000;
+      const wait = backoff + jitter;
+
+      console.warn(
+        `  ↳ 429 recibido, reintento ${attempt}/${maxRetries} en ${(wait / 1000).toFixed(1)}s...`,
+      );
+      await delay(wait);
+      continue;
+    }
+
+    throw new Error(`HTTP ${response.status} — ${api_url}`);
+  }
+}
+
+async function fetchPrice(id, api_url) {
+  const json = await fetchWithRetry(api_url);
 
   if (!json.success) return null;
 
   const raw = json.lowest_price ?? json.median_price ?? null;
   if (!raw) return null;
 
-  // Limpia símbolo de moneda y convierte a número
   const price = parseFloat(raw.replace(/[^0-9.]/g, ""));
   return isNaN(price) ? null : price;
 }
