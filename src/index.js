@@ -84,7 +84,7 @@ async function fetchPrice(id, api_url) {
 }
 
 async function run() {
-  const urls = await getSteamApiUrls();
+  const urls = (await getSteamApiUrls()).slice(0, 300); // ← límite de 300
   console.log(`Procesando ${urls.length} URLs...`);
 
   for (const [i, { id, api_url }] of urls.entries()) {
